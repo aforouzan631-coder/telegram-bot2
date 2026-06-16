@@ -30,7 +30,7 @@ def gold():
 
 def ai(text):
     res = client.models.generate_content(
-        model="gemini-1.5-flash",
+        model="gemini-1.5-flash-latest"
         contents=text
     )
     return res.text
