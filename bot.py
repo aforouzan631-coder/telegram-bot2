@@ -3,19 +3,23 @@ import sqlite3
 import requests
 from datetime import datetime, timedelta
 
-from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from flask import Flask, request
+from telegram import Bot, Update, ReplyKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 import google.generativeai as genai
 
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+ZARINPAL_MERCHANT = os.getenv("ZARINPAL_MERCHANT")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-PAY_URL = os.getenv("PAY_URL")  # لینک درگاه پرداخت
+BASE_URL = os.getenv("BASE_URL")  # لینک Railway
+
+bot = Bot(BOT_TOKEN)
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-1.5-pro",)
+model = genai.GenerativeModel("gemini-1.5-pro")
 
 # ================= DATABASE =================
 conn = sqlite3.connect("bot.db", check_same_thread=False)
@@ -29,126 +33,112 @@ vip_until TEXT
 """)
 conn.commit()
 
-# ================= MENU =================
-menu = ReplyKeyboardMarkup([
-    ["🤖 AI"],
-    ["💰 طلا", "💵 دلار"],
-    ["⭐ خرید VIP"],
-    ["👤 حساب کاربری"],
-    ["ℹ️ درباره"]
-], resize_keyboard=True)
-
-# ================= DB =================
-def add_user(uid):
-    c.execute("INSERT OR IGNORE INTO users VALUES (?, ?)", (uid, None))
-    conn.commit()
-
-def set_vip(uid, days=30):
+# ================= VIP =================
+def give_vip(user_id, days=30):
     vip_time = (datetime.now() + timedelta(days=days)).isoformat()
-    c.execute("UPDATE users SET vip_until=? WHERE user_id=?", (vip_time, uid))
+    c.execute("UPDATE users SET vip_until=? WHERE user_id=?", (vip_time, user_id))
     conn.commit()
 
-def is_vip(uid):
-    c.execute("SELECT vip_until FROM users WHERE user_id=?", (uid,))
+def is_vip(user_id):
+    c.execute("SELECT vip_until FROM users WHERE user_id=?", (user_id,))
     r = c.fetchone()
     if not r or not r[0]:
         return False
     return datetime.fromisoformat(r[0]) > datetime.now()
 
-def count_users():
-    c.execute("SELECT COUNT(*) FROM users")
-    return c.fetchone()[0]
+# ================= PAYMENT =================
+def create_payment(user_id):
+    data = {
+        "merchant_id": ZARINPAL_MERCHANT,
+        "amount": 50000,
+        "callback_url": f"{BASE_URL}/verify?user_id={user_id}",
+        "description": "VIP Subscription"
+    }
 
-# ================= API =================
-def gold():
-    try:
-        r = requests.get("https://api.tgju.org/v1/data/sana/json").json()
-        return f"💰 طلا: {r['data']['geram18']['p']} تومان"
-    except:
-        return "❌ خطا"
+    res = requests.post(
+        "https://api.zarinpal.com/pg/v4/payment/request.json",
+        json=data
+    ).json()
 
-def dollar():
-    try:
-        r = requests.get("https://api.tgju.org/v1/data/sana/json").json()
-        return f"💵 دلار: {r['data']['usd']['p']} تومان"
-    except:
-        return "❌ خطا"
+    return res
 
+# ================= AI =================
 def ai(text):
     res = model.generate_content(text)
     return res.text
 
+# ================= TRANSLATE =================
+def translate(text):
+    res = model.generate_content(f"Translate to English: {text}")
+    return res.text
+
+# ================= MENU =================
+menu = ReplyKeyboardMarkup([
+    ["🤖 AI"],
+    ["🌍 مترجم"],
+    ["💰 طلا", "💵 دلار"],
+    ["💎 خرید VIP"]
+], resize_keyboard=True)
+
 # ================= START =================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    add_user(uid)
+async def start(update, context):
+    await update.message.reply_text("👑 ربات VIP فعال شد", reply_markup=menu)
 
-    await update.message.reply_text(
-        "👑 ربات تجاری فعال شد\n👨‍💻 امیر علی فروزان اصل",
-        reply_markup=menu
-    )
-
-# ================= HANDLER =================
-async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ================= HANDLE =================
+async def handle(update, context):
     text = update.message.text
-    uid = update.effective_user.id
+    user_id = update.effective_user.id
 
-    add_user(uid)
+    if text == "💎 خرید VIP":
+        pay = create_payment(user_id)
 
-    if text == "💰 طلا":
-        await update.message.reply_text(gold())
+        if pay.get("data"):
+            link = "https://www.zarinpal.com/pg/StartPay/" + pay["data"]["authority"]
+            await update.message.reply_text(f"💳 پرداخت:\n{link}")
+        else:
+            await update.message.reply_text("❌ خطا در پرداخت")
         return
 
-    if text == "💵 دلار":
-        await update.message.reply_text(dollar())
-        return
-
-    # ================= VIP =================
-    if text == "⭐ خرید VIP":
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💳 پرداخت", url=PAY_URL)]
-        ])
-        await update.message.reply_text("💎 خرید VIP:", reply_markup=keyboard)
-        return
-
-    # ================= AI =================
     if text == "🤖 AI":
-        if not is_vip(uid) and uid != ADMIN_ID:
+        if not is_vip(user_id):
             await update.message.reply_text("🔒 فقط VIP")
             return
-        await update.message.reply_text("✍️ پیام بده")
+        await update.message.reply_text(ai("سلام"))
         return
 
-    # AI RESPONSE
-    try:
-        if is_vip(uid) or uid == ADMIN_ID:
-            await update.message.reply_text(ai(text))
-        else:
-            await update.message.reply_text("🔒 برای AI باید VIP بخری")
-    except:
-        await update.message.reply_text("❌ خطا")
-
-# ================= ADMIN =================
-async def vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+    if text == "🌍 مترجم":
+        await update.message.reply_text(translate(text))
         return
 
-    uid = int(context.args[0])
-    set_vip(uid, 30)
-    await update.message.reply_text("✅ VIP فعال شد")
+    await update.message.reply_text("❓ دستور نامشخص")
 
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
+# ================= FLASK VERIFY =================
+app = Flask(__name__)
 
-    await update.message.reply_text(f"👥 کاربران: {count_users()}")
+@app.route("/verify")
+def verify():
+    authority = request.args.get("Authority")
+    user_id = int(request.args.get("user_id"))
+
+    data = {
+        "merchant_id": ZARINPAL_MERCHANT,
+        "authority": authority,
+        "amount": 50000
+    }
+
+    res = requests.post(
+        "https://api.zarinpal.com/pg/v4/payment/verify.json",
+        json=data
+    ).json()
+
+    if res.get("data", {}).get("code") == 100:
+        give_vip(user_id, 30)
+        bot.send_message(user_id, "✅ VIP شما فعال شد 👑")
+        return "OK"
+
+    return "FAILED"
 
 # ================= RUN =================
-app = Application.builder().token(BOT_TOKEN).build()
-
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("vip", vip))
-app.add_handler(CommandHandler("stats", stats))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
-
-app.run_polling()
+app_bot = Application.builder().token(BOT_TOKEN).build()
+app_bot.add_handler(CommandHandler("start", start))
+app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
